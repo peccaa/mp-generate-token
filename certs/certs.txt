@@ -1,0 +1,6 @@
+certs directory
+cd to this directory and
+create private key and name it as private.pem:
+   on mac -> openssl genrsa -out private.pem 3072 (at least 2048 bits key) - not working anymore
+          -> ssh-keygen -t rsa -b 2048 -m PEM -f private.pem - WORKING!!!!
+   on windows -> ssh-keygen -t rsa -b "3072"
