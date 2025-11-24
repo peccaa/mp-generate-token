@@ -1,72 +1,175 @@
 const express = require("express");
 const createError = require("http-errors");
-const morgan = require("morgan");
-const JWT = require("jsonwebtoken");
+const path = require("path");
 const fs = require("fs");
-const { randomUUID } = require("crypto");
-const rsaPemToJwk = require("rsa-pem-to-jwk");
+const { randomUUID, createPrivateKey, createPublicKey } = require("crypto");
 require("dotenv").config();
+
+const requiredEnv = ["ISSUER", "AUDIENCE", "SCOPE", "CONSUMER"];
+const defaultKeyId = "c57c9c6d-65df-4203-8364-89601f336f3a";
+
+const loadConfig = () => {
+  const missing = requiredEnv.filter((key) => !process.env[key]);
+  if (missing.length) {
+    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  }
+
+  const privateKeyPath =
+    process.env.PRIVATE_KEY_PATH || path.join(__dirname, "certs", "private.pem");
+  if (!fs.existsSync(privateKeyPath)) {
+    throw new Error(`Private key not found at ${privateKeyPath}`);
+  }
+
+  return {
+    issuer: process.env.ISSUER,
+    audience: process.env.AUDIENCE,
+    scope: process.env.SCOPE,
+    consumer: process.env.CONSUMER,
+    privateKeyPath,
+    keyId: process.env.KEY_ID || defaultKeyId,
+    port: process.env.PORT || 4000,
+    resourceAudience: process.env.API_AUDIENCE,
+  };
+};
+
+let config;
+try {
+  config = loadConfig();
+} catch (err) {
+  console.error("[startup] Configuration error:", err.message);
+  process.exit(1);
+}
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-app.use(morgan("dev"));
 app.use(express.static("public"));
 
-// ssh-keygen -t rsa -b 2048 -m PEM -f private.pem - WORKING!!!!
-// openssl genrsa -out private.pem 3072 - NOT WORKING !!!
-// openssl rsa -in private.key -pubout > public.key
-const privateKey = fs.readFileSync("./certs/private.pem", "utf-8");
+let signingKey;
+let signingJwk;
+let keyFormat = "unknown";
+let exportJWK;
+let SignJWT;
+const { createDemoResourceRouter } = require("./resourceDemo");
 
-const keyIdentifier = "c57c9c6d-65df-4203-8364-89601f336f3a";
+const createAssertion = async () =>
+  new SignJWT({
+    jti: randomUUID(),
+    scope: config.scope,
+    consumer_org: config.consumer,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: config.keyId })
+    .setIssuer(config.issuer)
+    .setAudience(config.audience)
+    .setIssuedAt()
+    .setNotBefore("0s")
+    .setExpirationTime("120s")
+    .sign(signingKey);
 
-const signOptions = {
-  issuer: process.env.ISSUER,
-  audience: process.env.AUDIENCE,
-  expiresIn: "120s",
-  algorithm: "RS256",
-  keyid: keyIdentifier,
-};
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    keyLoaded: Boolean(signingKey),
+    kid: config.keyId,
+    keyFormat,
+    audience: config.audience,
+    resourceAudience: config.resourceAudience,
+  });
+});
 
 // Genererer JSON WEB KEY SETS som skal brukes i selvebetjeningsportalen
 app.get("/jwks", async (req, res, next) => {
-  const jwk = rsaPemToJwk(
-    privateKey,
-    { kid: keyIdentifier, alg: "RS256", use: "sig" },
-    "public"
-  );
-
-  console.log(jwk)
-
-  res.jsonp([jwk]);
+  try {
+    res.jsonp([signingJwk]);
+  } catch (err) {
+    next(createError(500, "Kunne ikke generere JWKS"));
+  }
 });
 
 // Genererer nøkkelen som skal brukes til å hente accessToken som gir tilgang til API
 app.get("/jwt_token", async (req, res, next) => {
-  const token = JWT.sign(
-    {
-      jti: randomUUID(),
-      scope: process.env.SCOPE,
-      consumer_org: process.env.CONSUMER,
-    },
-    privateKey,
-    signOptions
-  );
-
-  res.send({ jwt_token: token });
+  try {
+    const token = await createAssertion();
+    res.send({ jwt_token: token });
+  } catch (err) {
+    next(createError(500, "Kunne ikke generere JWT"));
+  }
 });
 
-app.use((req, res, next) => {
-  next(createError.NotFound());
+// Bytter assertion inn i et access token mot Maskinporten
+app.post("/access_token", async (req, res, next) => {
+  try {
+    const assertion = await createAssertion();
+    const tokenUrl = `${config.audience.replace(/\/$/, "")}/token`;
+
+    const response = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        assertion,
+      }),
+    });
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return next(
+        createError(response.status, body.error_description || "Kunne ikke hente access token")
+      );
+    }
+
+    return res.json(body);
+  } catch (err) {
+      console.log(err)
+    next(createError(500, "Kunne ikke hente access token"));
+  }
 });
 
-app.use((err, req, res, next) => {
-  res.status(err.status || 500);
-  res.send({
-    status: err.status || 500,
-    message: err.message,
-  });
-});
+const start = async () => {
+  try {
+    ({ exportJWK, SignJWT } = await import("jose"));
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => console.log(`🚀 @ http://localhost:${PORT}`));
+    const pem = fs.readFileSync(config.privateKeyPath, "utf-8");
+    const isPkcs1 = pem.includes("BEGIN RSA PRIVATE KEY");
+    keyFormat = isPkcs1 ? "PKCS#1" : "PKCS#8";
+
+    signingKey = createPrivateKey(pem);
+    const publicKey = createPublicKey(signingKey);
+
+    signingJwk = await exportJWK(publicKey);
+    signingJwk.use = "sig";
+    signingJwk.alg = "RS256";
+    signingJwk.kid = config.keyId;
+
+    const { router: demoRouter, jwksUrl } = await createDemoResourceRouter({
+      audience: config.audience,
+      expectedScope: config.scope,
+      resourceAudience: config.resourceAudience,
+    });
+
+    app.use(demoRouter);
+
+    app.use((req, res, next) => {
+      next(createError.NotFound());
+    });
+
+    app.use((err, req, res, next) => {
+      res.status(err.status || 500);
+      res.send({
+        status: err.status || 500,
+        message: err.message,
+      });
+    });
+
+    app.listen(config.port, () =>
+      console.log(
+        `http://localhost:${config.port} (kid=${config.keyId}, key=${config.privateKeyPath}, format=${keyFormat}, jwk=${jwksUrl})`
+      )
+    );
+  } catch (err) {
+    console.error("[startup] Key load error:", err.message);
+    process.exit(1);
+  }
+};
+
+start();
