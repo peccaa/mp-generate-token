@@ -10,7 +10,7 @@ Lightweight Express app that publishes JWKS, signs a Maskinporten JWT assertion 
 1) Generate a PKCS#1 private key and place it at `certs/private.pem` (or set a custom `PRIVATE_KEY_PATH`):
    - mac/linux: `openssl genrsa -traditional -out certs/private.pem 3072`
    - Windows: `ssh-keygen -t rsa -b 3072 -m PEM -f certs/private.pem`
-   - If Maskinporten generates a key for you: download the private part, store it at `certs/private.pem`, and set `KEY_ID` to the `kid` shown in the client UI.
+   - If Maskinporten generates a key for you: download the private part, store it at `certs/private.pem`, and set `KEY_ID` to the `kid` shown in the client UI from digdir selvebetjening.
 
 2) Create `.env` with required config:
    ```env
