@@ -75,7 +75,7 @@ Lightweight Express app that publishes JWKS, signs a Maskinporten JWT assertion 
 
 ## Notes
 - Uses `jose` for signing, verification, and JWKS generation; supply an RSA key (`-----BEGIN RSA PRIVATE KEY-----`).
-- Use Bun as the default package manager; `bun.lock` is tracked and `package-lock.json` is ignored.
+- Use Bun as the default package manager;
 - Never commit private keys or `.env`.
 - `KEY_ID` is not secret but should be unique per key and environment; update it when rotating keys so JWKS/Maskinporten matches the right public key.
 - If startup fails, verify env values and key path (check `/health` when running).
